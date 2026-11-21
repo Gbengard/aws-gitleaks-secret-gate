@@ -1,0 +1,17 @@
+version: 0.2
+
+env:
+  variables:
+    GITLEAKS_VERSION: "8.30.1"
+    GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+phases:
+  build:
+    commands:
+      - bash scripts/secret-scan.sh
+
+# Only reached when the scan passed. The Deploy stage receives these files and nothing else.
+artifacts:
+  base-directory: site
+  files:
+    - "**/*"

@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Secret gate demo, stack 1 of 2. Creates the two buckets and the GitHub connection.
+  The connection is created in PENDING status. You must authorize it in the console
+  before you deploy stack 2.
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub gitleaks-demo-artifacts-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub gitleaks-demo-site-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  GitHubConnection:
+    Type: AWS::CodeConnections::Connection
+    Properties:
+      ConnectionName: gitleaks-demo-github
+      ProviderType: GitHub
+
+Outputs:
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: gitleaks-demo-ArtifactBucketName
+  SiteBucketName:
+    Value: !Ref SiteBucket
+    Export:
+      Name: gitleaks-demo-SiteBucketName
+  ConnectionArn:
+    Value: !GetAtt GitHubConnection.ConnectionArn
+    Export:
+      Name: gitleaks-demo-ConnectionArn
+  ConnectionStatus:
+    Description: Shows PENDING until you authorize the connection in the console.
+    Value: !GetAtt GitHubConnection.ConnectionStatus

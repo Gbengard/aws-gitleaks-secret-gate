@@ -1,0 +1,11 @@
+title = "gitleaks-demo"
+
+# Keep every default rule, then add our own on top.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "demo-internal-token"
+description = "Internal demo token"
+regex = '''demo_tok_[A-Za-z0-9]{24}\b'''
+keywords = ["demo_tok_"]

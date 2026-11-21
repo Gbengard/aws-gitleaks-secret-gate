@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Secret gate demo, stack 2 of 2. Creates the log group, CodeBuild scan project,
+  two roles and the pipeline. Deploy it only after the GitHub connection from
+  stack 1 shows AVAILABLE.
+
+Parameters:
+  GitHubRepository:
+    Type: String
+    Description: Your throwaway repo in the form owner/name, for example Gbengard/gitleaks-demo-app.
+    AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+  BranchName:
+    Type: String
+    Default: main
+
+Resources:
+  ScanLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/codebuild/gitleaks-demo-scan
+      RetentionInDays: 14
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: gitleaks-demo-codebuild-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: gitleaks-demo-codebuild-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt ScanLogGroup.Arn
+                  - !Sub ${ScanLogGroup.Arn}:*
+              - Sid: ArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub
+                  - arn:${AWS::Partition}:s3:::${Bucket}/*
+                  - Bucket: !ImportValue gitleaks-demo-ArtifactBucketName
+              - Sid: ArtifactBucketLocation
+                Effect: Allow
+                Action:
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource: !Sub
+                  - arn:${AWS::Partition}:s3:::${Bucket}
+                  - Bucket: !ImportValue gitleaks-demo-ArtifactBucketName
+              - Sid: FullCloneUsesTheConnection
+                Effect: Allow
+                Action:
+                  - codeconnections:UseConnection
+                  - codestar-connections:UseConnection
+                Resource:
+                  - !ImportValue gitleaks-demo-ConnectionArn
+                  - !Sub
+                    - arn:${AWS::Partition}:codestar-connections:${AWS::Region}:${AWS::AccountId}:connection/${ConnectionId}
+                    - ConnectionId: !Select
+                        - 1
+                        - !Split ["connection/", !ImportValue gitleaks-demo-ConnectionArn]
+
+  ScanProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: gitleaks-demo-scan
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - Name: ARTIFACT_BUCKET
+            Type: PLAINTEXT
+            Value: !ImportValue gitleaks-demo-ArtifactBucketName
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref ScanLogGroup
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: gitleaks-demo-pipeline-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: gitleaks-demo-pipeline-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub
+                  - arn:${AWS::Partition}:s3:::${Bucket}/*
+                  - Bucket: !ImportValue gitleaks-demo-ArtifactBucketName
+              - Sid: ArtifactBucketInfo
+                Effect: Allow
+                Action:
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource: !Sub
+                  - arn:${AWS::Partition}:s3:::${Bucket}
+                  - Bucket: !ImportValue gitleaks-demo-ArtifactBucketName
+              - Sid: SiteBucketDeploy
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:PutObjectVersionAcl
+                Resource: !Sub
+                  - arn:${AWS::Partition}:s3:::${Bucket}/*
+                  - Bucket: !ImportValue gitleaks-demo-SiteBucketName
+              - Sid: SiteBucketInfo
+                Effect: Allow
+                Action:
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource: !Sub
+                  - arn:${AWS::Partition}:s3:::${Bucket}
+                  - Bucket: !ImportValue gitleaks-demo-SiteBucketName
+              - Sid: RunTheScan
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt ScanProject.Arn
+              - Sid: UseTheConnection
+                Effect: Allow
+                Action:
+                  - codeconnections:UseConnection
+                  - codestar-connections:UseConnection
+                Resource:
+                  - !ImportValue gitleaks-demo-ConnectionArn
+                  - !Sub
+                    - arn:${AWS::Partition}:codestar-connections:${AWS::Region}:${AWS::AccountId}:connection/${ConnectionId}
+                    - ConnectionId: !Select
+                        - 1
+                        - !Split ["connection/", !ImportValue gitleaks-demo-ConnectionArn]
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: gitleaks-demo-pipeline
+      PipelineType: V2
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !ImportValue gitleaks-demo-ArtifactBucketName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHubSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !ImportValue gitleaks-demo-ConnectionArn
+                FullRepositoryId: !Ref GitHubRepository
+                BranchName: !Ref BranchName
+                DetectChanges: "true"
+                OutputArtifactFormat: CODEBUILD_CLONE_REF
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Scan
+          Actions:
+            - Name: GitleaksScan
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref ScanProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: SiteFiles
+        - Name: Deploy
+          Actions:
+            - Name: DeploySite
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: "1"
+              Configuration:
+                BucketName: !ImportValue gitleaks-demo-SiteBucketName
+                Extract: "true"
+              InputArtifacts:
+                - Name: SiteFiles
+
+Outputs:
+  PipelineName:
+    Value: !Ref Pipeline
+  ScanProjectName:
+    Value: !Ref ScanProject
+  ScanLogGroupName:
+    Value: !Ref ScanLogGroup
