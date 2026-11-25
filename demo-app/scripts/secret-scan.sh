@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Scans the full Git history behind the commit being built.
+# Scans the files in the source zip that CodePipeline hands to CodeBuild.
 # Exit 0 = clean. Any other exit code stops the pipeline.
+# This scan sees the files as they are in this commit. It does not see Git history.
 set -uo pipefail
 
 GITLEAKS_VERSION="${GITLEAKS_VERSION:?GITLEAKS_VERSION is not set}"
@@ -22,19 +23,14 @@ echo "${GITLEAKS_SHA256}  ${TMP}/${TARBALL}" | sha256sum -c - >/dev/null \
 tar -xzf "${TMP}/${TARBALL}" -C "${TMP}" gitleaks
 install -m 0755 "${TMP}/gitleaks" "${INSTALL_DIR}/gitleaks" || fail "could not install Gitleaks"
 
-# 2. Refuse to scan a partial history. A shallow clone would hide old commits.
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-  || fail "this is not a Git repository. Set the Source action to Full clone."
-if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-  fail "the clone is shallow, so the scan would miss old commits."
-fi
-echo "Scanning $(git rev-list --count HEAD) commit(s) reachable from $(git rev-parse --short HEAD)"
+# 2. Make sure we are looking at the source files. An empty folder would pass without checking anything.
+[ -d site ] || fail "the folder 'site' is missing. The source files did not arrive."
+echo "Scanning $(find . -type f | wc -l) file(s)"
 
 # 3. Scan. --redact keeps the secret out of the log and the report.
 CONFIG_ARGS=()
 [ -f "${CONFIG}" ] && CONFIG_ARGS=(--config "${CONFIG}")
-"${INSTALL_DIR}/gitleaks" git . \
-  --log-opts="HEAD" \
+"${INSTALL_DIR}/gitleaks" dir . \
   --redact --no-banner --exit-code 1 \
   --report-format json --report-path "${REPORT}" \
   "${CONFIG_ARGS[@]}"
@@ -54,11 +50,11 @@ if [ "${STATUS}" -eq 0 ]; then
   exit 0
 fi
 if [ "${STATUS}" -eq 1 ]; then
-  echo "SECRETS FOUND. The pipeline is blocked. Rotate the secret, then fix the history."
+  echo "SECRETS FOUND. The pipeline is blocked. Rotate the secret, then remove it from the files."
   python3 - "${REPORT}" <<'PY' || true
 import json, sys
 for f in json.load(open(sys.argv[1])):
-    print(f"  rule={f['RuleID']} file={f['File']} line={f['StartLine']} commit={f['Commit'][:8]}")
+    print(f"  rule={f['RuleID']} file={f['File']} line={f['StartLine']}")
     print(f"  fingerprint={f['Fingerprint']}")
 PY
   exit 1

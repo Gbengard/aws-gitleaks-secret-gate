@@ -10,7 +10,8 @@ phases:
     commands:
       - bash scripts/secret-scan.sh
 
-# Only reached when the scan passed. The Deploy stage receives these files and nothing else.
+# CodeBuild packs these files even when the scan fails. The Deploy stage still does not start,
+# because a failed Build action fails the stage. Deploy receives these files and nothing else.
 artifacts:
   base-directory: site
   files:

@@ -1,0 +1,234 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Secret gate demo. Creates the two buckets, the log group, the CodeBuild scan project,
+  two roles and the pipeline. The pipeline reads your GitHub repo with a personal access
+  token that you store in Secrets Manager before you deploy this stack.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: Your GitHub user name, for example Gbengard.
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  GitHubRepository:
+    Type: String
+    Default: gitleaks-demo-app
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  BranchName:
+    Type: String
+    Default: main
+  GitHubTokenSecretName:
+    Type: String
+    Default: gitleaks-demo/github-token
+    Description: Secrets Manager secret that holds {"token":"<your GitHub token>"}.
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub gitleaks-demo-artifacts-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub gitleaks-demo-site-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ScanLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/codebuild/gitleaks-demo-scan
+      RetentionInDays: 14
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: gitleaks-demo-codebuild-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: gitleaks-demo-codebuild-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt ScanLogGroup.Arn
+                  - !Sub ${ScanLogGroup.Arn}:*
+              - Sid: ArtifactObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub ${ArtifactBucket.Arn}/*
+              - Sid: ArtifactBucketInfo
+                Effect: Allow
+                Action:
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource: !GetAtt ArtifactBucket.Arn
+
+  ScanProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: gitleaks-demo-scan
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - Name: ARTIFACT_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref ArtifactBucket
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref ScanLogGroup
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: gitleaks-demo-pipeline-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: gitleaks-demo-pipeline-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ArtifactObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub ${ArtifactBucket.Arn}/*
+              - Sid: ArtifactBucketInfo
+                Effect: Allow
+                Action:
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource: !GetAtt ArtifactBucket.Arn
+              - Sid: SiteDeploy
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:PutObjectVersionAcl
+                Resource: !Sub ${SiteBucket.Arn}/*
+              - Sid: SiteBucketInfo
+                Effect: Allow
+                Action:
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource: !GetAtt SiteBucket.Arn
+              - Sid: RunTheScan
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt ScanProject.Arn
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: gitleaks-demo-pipeline
+      PipelineType: V2
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: "1"
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepository
+                Branch: !Ref BranchName
+                OAuthToken: !Sub "{{resolve:secretsmanager:${GitHubTokenSecretName}:SecretString:token}}"
+                PollForSourceChanges: "true"
+              OutputArtifacts:
+                - Name: SourceArtifact
+        - Name: Build
+          Actions:
+            - Name: GitleaksScan
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref ScanProject
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+        - Name: Deploy
+          Actions:
+            - Name: DeploySite
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: "1"
+              Configuration:
+                BucketName: !Ref SiteBucket
+                Extract: "true"
+              InputArtifacts:
+                - Name: BuildArtifact
+
+Outputs:
+  PipelineName:
+    Value: !Ref Pipeline
+  SiteBucketName:
+    Value: !Ref SiteBucket
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
